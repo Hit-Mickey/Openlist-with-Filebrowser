@@ -1,0 +1,157 @@
+server:
+  # 与 Compose 的 2100:80 保持一致；同时支持直接端口访问和 Caddy 域名反代。
+  port: 80
+  listen: "0.0.0.0"
+  baseURL: "/"
+
+  # 运行数据均放入 Compose 持久化的 ./data 目录。
+  database: "/home/filebrowser/data/database.db"
+  cacheDir: "/home/filebrowser/data/tmp"
+  # 不在重启时清理缓存，以保留未完成操作需要的数据。
+  cacheDirCleanup: false
+
+  # 轻量模式：本服务只负责浏览、下载和上传，不生成媒体缩略图。
+  minSearchLength: 3
+  disableUpdateCheck: true
+  numImageProcessors: 1
+  disablePreviews: true
+  disablePreviewResize: true
+  disableTypeDetectionByHeader: true
+  disableWebDAV: true
+
+  logging:
+    - levels: "info|warning|error"
+      apiLevels: "warning|error"
+      output: "stdout"
+      noColors: false
+      json: false
+      utc: false
+
+  sources:
+    - path: "/local"
+      name: "local"
+      config:
+        # 必须登录；private 额外禁止创建公开分享链接。
+        defaultEnabled: true
+        defaultUserScope: "/"
+        denyByDefault: false
+        private: true
+        readOnly: false
+        disabled: false
+        useLogicalSize: false
+
+  # 0 表示不限制服务端归档/解压大小；多选下载仍使用流式归档。
+  maxArchiveSize: 0
+
+  filesystem:
+    createFilePermission: "644"
+    createDirectoryPermission: "755"
+
+  # 降低 SQLite 索引缓存，保持轻量；保留索引复用及启动完整性检查。
+  indexSqlConfig:
+    batchSize: 1000
+    cacheSizeMB: 16
+    walMode: false
+    disableReuse: false
+    startupIntegrityCheck: "quickCheck"
+
+auth:
+  key: ""
+  tokenExpirationHours: 12
+  methods:
+    # 明确禁止匿名访问和自行注册。
+    noauth: false
+    password:
+      enabled: true
+      # 当前密码为“1”，因此最小长度必须保持为 1。
+      minLength: 1
+      signup: false
+      enforcedOtp: false
+  adminUsername: "test"
+  # 该字段会在每次启动时重置管理员密码。
+  adminPassword: "1"
+
+frontend:
+  name: "OpenList FileBrowser"
+  disableDefaultLinks: true
+  disableUsedPercentage: true
+  disableNavButtons: false
+  styling:
+    disableEventThemes: true
+
+userDefaults:
+  sidebar:
+    disableQuickToggles: true
+    hideFileActions: false
+    disableHideOnPreview: false
+    sticky: true
+    hideFiles: false
+    showTools: false
+
+  listing:
+    deleteWithoutConfirming: false
+    dateFormat: true
+    showHidden: false
+    quickDownload: true
+    showSelectMultiple: true
+    singleClick: false
+    showCopyPath: false
+    # 避免归档或解压完成后删除源文件。
+    deleteAfterArchive: false
+    viewMode: "list"
+    gallerySize: 0
+
+  preview:
+    image: false
+    video: false
+    audio: false
+    motionVideoPreview: false
+    office: false
+    popup: false
+    highQuality: false
+    folder: false
+    models: false
+
+  fileViewer:
+    editorQuickSave: false
+    autoplayMedia: false
+    preferEditorForMarkdown: false
+    debugOffice: false
+    defaultMediaPlayer: true
+
+  search:
+    disableOptions: true
+
+  ui:
+    darkMode: true
+    themeColor: "var(--blue)"
+    locale: "zh-cn"
+
+  fileLoading:
+    # 最多同时上传 3 项，每项按 10 MiB 分块，支持暂停、继续和重试。
+    maxConcurrentUpload: 3
+    uploadChunkSizeMb: 10
+    clearAll: false
+    # 0 保持浏览器/下载器的标准流式响应与 Range 行为。
+    downloadChunkSizeMb: 0
+
+  account:
+    permissions:
+      api: false
+      admin: false
+      modify: true
+      share: false
+      realtime: false
+      delete: true
+      create: true
+      download: true
+    lockPassword: false
+    disableSettings: false
+    loginMethod: "password"
+    disableUpdateNotifications: true
+
+http:
+  # 由于 2100 仍允许直接访问，不信任客户端可伪造的代理 IP 请求头。
+  # Caddy 反代仍可正常工作，只是日志和登录限速使用代理连接 IP。
+  trustedHeaders: []
+  disableRateLimit: false

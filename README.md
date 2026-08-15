@@ -298,10 +298,11 @@ OpenListFileBrowserDebug.uploadUrl("/local/temp")
 
 - FileBrowser 的配置、数据库和缓存保存在 ./filebrowser-data。
 - FileBrowser 当前启用了密码认证，匿名用户不能上传或下载。
-- adminUsername 和 adminPassword 只适合首次初始化或内网测试，不要把真实密码提交到公开仓库。
+- filebrowser-data/config.yaml 中的 auth.adminUsername 和 auth.adminPassword 是管理员初始化凭据，当前值仅用于测试；部署前必须修改为新的强用户名和至少 8 位密码。
+- FileBrowser 创建 database.db 后，后续启动通常以数据库中的用户为准；修改 config.yaml 中的初始密码不一定会覆盖已有用户。已有用户应在 FileBrowser 页面修改密码，或在确认数据可重建后再重新初始化数据库。
 - Meilisearch 的 MEILI_MASTER_KEY 不应留空；生产环境应使用随机密钥，并让 OpenList 使用相同密钥或单独的最小权限 API Key。
 - 不建议直接将宿主机 2000、2100、2700 端口暴露到公网，公网访问应通过 Caddy HTTPS 和访问控制。
-- ./openlist-data、./filebrowser-data、./meilisearch、.env 和数据库文件应加入 .gitignore，只提交不含凭据的示例配置。
+- 本仓库会提交 filebrowser-data/config.yaml 作为部署配置，但不会提交 database.db、索引、快照或其他运行时数据；提交到公开仓库前必须确认配置中没有生产环境凭据。
 
 ## License
 
