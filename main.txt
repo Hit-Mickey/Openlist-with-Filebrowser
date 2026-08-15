@@ -74,9 +74,9 @@
             // 中文原文：已打开 FileBrowser 上传页面，请登录后上传。[ZH]
             uploadPageOpened:
                 "\u5df2\u6253\u5f00 FileBrowser \u4e0a\u4f20\u9875\u9762\uff0c\u8bf7\u767b\u5f55\u540e\u4e0a\u4f20",
-            // 中文原文：openlist上传功能很垃圾，请转到filebrowser重新拖拽上传。[ZH]
+            // 中文原文：请转到filebrowser重新上传。[ZH]
             dragUploadRedirect:
-                "openlist\u4e0a\u4f20\u529f\u80fd\u5f88\u5783\u573e\uff0c\u8bf7\u8f6c\u5230filebrowser\u91cd\u65b0\u62d6\u62fd\u4e0a\u4f20"
+                "\u8bf7\u8f6c\u5230filebrowser\u91cd\u65b0\u4e0a\u4f20"
         },
 
         // 是否保留 Console 调试输出

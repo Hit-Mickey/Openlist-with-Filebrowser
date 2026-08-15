@@ -1,8 +1,31 @@
-# OpenList + FileBrowser Quantum + Meilisearch
+# OpenList with FileBrowser Quantum
 
-本项目使用 OpenList 负责文件列表和存储管理，使用 FileBrowser Quantum 负责 /local 文件的登录、上传、下载和流式 ZIP 打包，使用 Meilisearch 为 OpenList 提供搜索服务。
+## 特点
 
-脚本文件 main.txt 只接管 OpenList 中映射到 /local 和 /nas 的下载、打包下载及上传入口，其他路径继续使用 OpenList 原生逻辑。
+1. 本项目使用 [OpenList](https://github.com/OpenListTeam/OpenList) 负责文件列表和存储管理。
+2. 使用 [FileBrowser Quantum](https://github.com/gtsteffaniak/filebrowser) 负责 /local 文件的登录、上传、下载和流式 ZIP 打包，使得远程访问openlist时可以方便进行打包下载而不必重新下载aria2进行配置，上传时跳转filebrowser，可以对单个上传任务进行管理。
+3. 使用 [Meilisearch](https://github.com/meilisearch/meilisearch) 为 OpenList 提供搜索服务。
+
+> 注意:
+> 1、当前脚本文件 main.txt 只接管 OpenList 本机存储的下载、打包下载及上传入口，其他存储可自行修改。
+> 2、本人不才，该项目代码借助AI帮我实现了个人需求，使用请注意甄别。
+
+## 快速开始
+
+直接使用仓库中的[docker-compose.yml](docker-compose.yml)进行部署，然后在openlist的全局设置中`自定义头部`添加main.txt中的内容
+![alt text](assets/image.png)
+
+配置部分见下。
+
+### 实现效果
+
+下载效果：
+如图，成功调用filebrowser实现打包下载
+![alt text](assets/image-1.png)
+
+上传效果：
+如图，会跳转filebrowser上传
+![alt text](assets/image3.png)
 
 ## 当前部署结构
 
@@ -113,7 +136,7 @@ ports:
 filebrowserPort: "2100"
 ~~~
 
-这个端口只用于没有命中域名映射时的回退地址。例如从 http://10.2.1.2:2000 访问 OpenList 时，脚本会回退到 http://10.2.1.2:2100。
+这个端口只用于没有命中域名映射时的回退地址。例如从 <http://10.2.1.2:2000> 访问 OpenList 时，脚本会回退到 <http://10.2.1.2:2100。>
 
 如果把 Compose 改成：
 
@@ -166,7 +189,7 @@ filebrowserBaseByOpenListOrigin: {
 }
 ~~~
 
-如果使用同一个域名的路径反代，也要把完整的 FileBrowser 基础地址写入右侧，例如 https://example.com/filebrowser，并确保 Caddy 将该路径转发到 FileBrowser。
+如果使用同一个域名的路径反代，也要把完整的 FileBrowser 基础地址写入右侧，例如 <https://example.com/filebrowser，并确保> Caddy 将该路径转发到 FileBrowser。
 
 没有匹配的 Origin 时，脚本会使用 当前协议://当前主机:filebrowserPort。因此 HTTPS 页面不能回退到 HTTP 的 2100 端口，否则浏览器可能阻止混合内容请求。
 
