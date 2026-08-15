@@ -1,0 +1,1909 @@
+<script>
+(() => {
+    /*
+     * ================================================================
+     * 用户配置区：通常只需要修改这个对象，后面的脚本逻辑无需改动。
+     * ================================================================
+     */
+    const USER_CONFIG = {
+        /*
+         * OpenList Web 路径到 FileBrowser Quantum 源内路径的映射。
+         *
+         * /local -> 宿主机 /home/mickey     -> FileBrowser /local 源的 /
+         * /nas   -> 宿主机 /home/mickey/nas -> FileBrowser /local 源的 /nas
+         */
+        pathMappings: [
+            {
+                openlistPrefix: "/local",
+                filebrowserPrefix: "/"
+            },
+            {
+                openlistPrefix: "/nas",
+                filebrowserPrefix: "/nas"
+            }
+        ],
+
+        // FileBrowser Quantum 对外端口和配置文件中的源名称
+        filebrowserPort: "2100",
+        filebrowserSource: "local",
+
+        /*
+         * 可选：按 OpenList 的完整 Origin 指定 FileBrowser 反代地址。
+         * Origin 必须包含协议；非标准端口也必须写在这里。
+         * 未匹配时自动回退为 当前协议://当前主机:2100。
+         *
+         * 示例：
+         * "https://openlist.example.com":
+         *     "https://download.example.com",
+         * "https://openlist.example.com:8443":
+         *     "https://download.example.com:9443"
+         */
+        filebrowserBaseByOpenListOrigin: {
+            "https://openlist.example.com":
+                "https://download.example.com",
+           "https://openlist.example.com:8443":
+                "https://download.example.com:9443"
+        },
+
+        // 下载和上传页面的打开目标；_blank 表示在新标签页打开。
+        downloadWindowTarget: "_blank",
+        uploadWindowTarget: "_blank",
+
+        // 顶部提示的显示、淡出和拖拽提示防抖时间（毫秒）。
+        noticeVisibleMs: 1800,
+        noticeFadeMs: 300,
+        dragNoticeCooldownMs: 1800,
+
+        // 用户可见提示文案。
+        messages: {
+            // 中文原文：已调用 FileBrowser 打包文件夹。[ZH]
+            singleFolderDownload:
+                "\u5df2\u8c03\u7528 FileBrowser \u6253\u5305\u6587\u4ef6\u5939",
+            // 中文原文：已调用 FileBrowser 下载文件。[ZH]
+            singleFileDownload:
+                "\u5df2\u8c03\u7528 FileBrowser \u4e0b\u8f7d\u6587\u4ef6",
+            // 中文原文：已调用 FileBrowser 打包 N 个项目。[ZH]
+            multiDownload: count =>
+                `\u5df2\u8c03\u7528 FileBrowser \u6253\u5305 ${count} \u4e2a\u9879\u76ee`,
+            // 中文原文：创建打包下载失败。[ZH]
+            packageDownloadFailed:
+                "\u521b\u5efa\u6253\u5305\u4e0b\u8f7d\u5931\u8d25",
+            // 中文原文：浏览器阻止了上传页面，请允许弹出窗口。[ZH]
+            uploadPopupBlocked:
+                "\u6d4f\u89c8\u5668\u963b\u6b62\u4e86\u4e0a\u4f20\u9875\u9762\uff0c\u8bf7\u5141\u8bb8\u5f39\u51fa\u7a97\u53e3",
+            // 中文原文：已打开 FileBrowser 上传页面，请登录后上传。[ZH]
+            uploadPageOpened:
+                "\u5df2\u6253\u5f00 FileBrowser \u4e0a\u4f20\u9875\u9762\uff0c\u8bf7\u767b\u5f55\u540e\u4e0a\u4f20",
+            // 中文原文：openlist上传功能很垃圾，请转到filebrowser重新拖拽上传。[ZH]
+            dragUploadRedirect:
+                "openlist\u4e0a\u4f20\u529f\u80fd\u5f88\u5783\u573e\uff0c\u8bf7\u8f6c\u5230filebrowser\u91cd\u65b0\u62d6\u62fd\u4e0a\u4f20"
+        },
+
+        // 是否保留 Console 调试输出
+        debug: true
+    };
+
+    /* 用户配置区结束。 */
+
+    (() => {
+    "use strict";
+
+    const SCRIPT_VERSION = "2026-08-15.3";
+    const LOAD_FLAG =
+        "__OPENLIST_FILEBROWSER_RUNTIME__";
+    const previousRuntime = window[LOAD_FLAG];
+
+    if (
+        previousRuntime &&
+        previousRuntime.version === SCRIPT_VERSION &&
+        typeof previousRuntime.ensureInstalled ===
+            "function"
+    ) {
+        previousRuntime.ensureInstalled(
+            "duplicate-script",
+            true
+        );
+        return;
+    }
+
+    if (
+        previousRuntime &&
+        typeof previousRuntime.destroy === "function"
+    ) {
+        previousRuntime.destroy("script-upgrade");
+    }
+
+    const runtime = {
+        version: SCRIPT_VERSION,
+        abortController: null,
+        installed: false,
+        installCount: 0,
+        lastInstallReason: ""
+    };
+
+    window[LOAD_FLAG] = runtime;
+
+    const CONFIG = {
+        ...USER_CONFIG,
+        version: SCRIPT_VERSION
+    };
+
+    const FOLDER_SIZE_MARKS = new Set([
+        "",
+        "-",
+        // 中文原文：全角破折号“—” [ZH]
+        "\u2014",
+        // 中文原文：短破折号“–” [ZH]
+        "\u2013"
+    ]);
+
+    let lastContextTarget = null;
+
+    function log(...args) {
+        if (CONFIG.debug) {
+            console.log(
+                "[OpenList-FileBrowser]",
+                ...args
+            );
+        }
+    }
+
+    function describeElement(element) {
+        if (!(element instanceof Element)) {
+            return null;
+        }
+
+        return {
+            tag: element.tagName,
+            id: element.id || "",
+            className:
+                typeof element.className === "string"
+                    ? element.className
+                    : element.getAttribute("class") || "",
+            text: (
+                element.textContent || ""
+            )
+                .trim()
+                .replace(/\s+/g, " ")
+                .slice(0, 120)
+        };
+    }
+
+    function getPathMapping(path) {
+        return CONFIG.pathMappings.find(
+            mapping =>
+                path === mapping.openlistPrefix ||
+                path.startsWith(
+                    mapping.openlistPrefix + "/"
+                )
+        ) || null;
+    }
+
+    function isManagedPath(path) {
+        return getPathMapping(path) !== null;
+    }
+
+    function normalizeFileBrowserBase(value) {
+        try {
+            const url = new URL(value);
+
+            if (![
+                "http:",
+                "https:"
+            ].includes(url.protocol)) {
+                throw new Error(
+                    "Only HTTP and HTTPS endpoints are supported"
+                );
+            }
+
+            const path = url.pathname
+                .replace(/\/+$/, "");
+
+            return url.origin + path;
+        } catch (error) {
+            log(
+                "Invalid configured FileBrowser base:",
+                value,
+                error
+            );
+
+            return null;
+        }
+    }
+
+    function getFileBrowserEndpoint() {
+        const openlistOrigin =
+            window.location.origin;
+        const configured =
+            CONFIG.filebrowserBaseByOpenListOrigin[
+                openlistOrigin
+            ];
+        const configuredBase = configured
+            ? normalizeFileBrowserBase(configured)
+            : null;
+
+        if (configuredBase) {
+            return {
+                base: configuredBase,
+                source: "origin-map",
+                openlistOrigin,
+                matchedOrigin: openlistOrigin
+            };
+        }
+
+        return {
+            base:
+                window.location.protocol +
+                "//" +
+                window.location.hostname +
+                ":" +
+                CONFIG.filebrowserPort,
+            source: "same-host-port-fallback",
+            openlistOrigin,
+            matchedOrigin: null
+        };
+    }
+
+    function getFileBrowserBase() {
+        return getFileBrowserEndpoint().base;
+    }
+
+    function encodePath(path) {
+        return path
+            .split("/")
+            .map(part => encodeURIComponent(part))
+            .join("/");
+    }
+
+    function getOpenListPath(href) {
+        try {
+            const url = new URL(
+                href,
+                window.location.origin
+            );
+
+            return decodeURIComponent(
+                url.pathname
+            );
+        } catch (error) {
+            log(
+                "Failed to parse OpenList path:",
+                href,
+                error
+            );
+
+            return null;
+        }
+    }
+
+    function getFileBrowserRawPath(openlistPath) {
+        const mapping =
+            getPathMapping(openlistPath);
+
+        if (!mapping) {
+            return null;
+        }
+
+        const relative = openlistPath.slice(
+            mapping.openlistPrefix.length
+        );
+
+        const prefix =
+            mapping.filebrowserPrefix === "/"
+                ? ""
+                : mapping.filebrowserPrefix
+                    .replace(/\/+$/, "");
+
+        const path =
+            prefix + relative;
+
+        return path || "/";
+    }
+
+    function getFileBrowserPath(openlistPath) {
+        const path =
+            getFileBrowserRawPath(openlistPath);
+
+        return path === null
+            ? null
+            : encodePath(path);
+    }
+
+    function buildFileBrowserDownloadUrl(openlistPaths) {
+        const paths = (
+            Array.isArray(openlistPaths)
+                ? openlistPaths
+                : [openlistPaths]
+        ).map(getFileBrowserRawPath);
+
+        if (
+            !paths.length ||
+            paths.some(path => path === null)
+        ) {
+            return null;
+        }
+
+        const params = new URLSearchParams();
+
+        params.set(
+            "source",
+            CONFIG.filebrowserSource
+        );
+
+        for (const path of paths) {
+            params.append("file", path);
+        }
+
+        params.set("algo", "zip");
+
+        return (
+            getFileBrowserBase() +
+            "/api/resources/download?" +
+            params.toString()
+        );
+    }
+
+    function launchFileBrowserDownload(url) {
+        const link = document.createElement("a");
+
+        link.href = url;
+        link.target = CONFIG.downloadWindowTarget;
+        link.rel = "noopener noreferrer";
+        link.style.display = "none";
+
+        const parent = document.body ||
+            document.documentElement;
+
+        parent.appendChild(link);
+        link.click();
+        link.remove();
+
+        log(
+            "FileBrowser download opened without unloading OpenList:",
+            url
+        );
+    }
+
+    function buildFileBrowserUploadUrl(
+        openlistPath
+    ) {
+        let path = getFileBrowserPath(
+            openlistPath
+        );
+
+        if (path === null) {
+            return null;
+        }
+
+        path = path.replace(/^\/+/, "");
+
+        return (
+            getFileBrowserBase() +
+            "/files/" +
+            encodeURIComponent(
+                CONFIG.filebrowserSource
+            ) +
+            "/" +
+            path
+        );
+    }
+
+    function normalizeMenuText(element) {
+        return (
+            element &&
+            element.textContent ||
+            ""
+        )
+            .trim()
+            .replace(/\s+/g, "");
+    }
+
+    function getActionLabels(element) {
+        const labels = new Set();
+        let current = element;
+        let depth = 0;
+
+        const addLabel = value => {
+            const label = (value || "")
+                .trim()
+                .replace(/\s+/g, "");
+
+            if (label) {
+                labels.add(label);
+            }
+        };
+
+        while (
+            current instanceof Element &&
+            current !== document.body &&
+            depth < 6
+        ) {
+            for (const attribute of [
+                "aria-label",
+                "title",
+                "tips",
+                "data-tip",
+                "data-tooltip"
+            ]) {
+                addLabel(
+                    current.getAttribute(attribute)
+                );
+            }
+
+            if (
+                current.matches(
+                    "button, a, [role='button'], [role='menuitem']"
+                )
+            ) {
+                addLabel(current.textContent);
+            }
+
+            const describedBy =
+                current.getAttribute(
+                    "aria-describedby"
+                );
+
+            if (describedBy) {
+                for (
+                    const id of
+                    describedBy.split(/\s+/)
+                ) {
+                    const description =
+                        document.getElementById(id);
+
+                    addLabel(
+                        description &&
+                        description.textContent
+                    );
+                }
+            }
+
+            current = current.parentElement;
+            depth += 1;
+        }
+
+        return Array.from(labels);
+    }
+
+    function isUploadAction(element) {
+        const labels = getActionLabels(element);
+
+        // 中文原文：上传；同时匹配 OpenList 的 tips="upload" 稳定标识。[ZH]
+        return labels.some(
+            label =>
+                label === "\u4e0a\u4f20" ||
+                label.toLowerCase() === "upload"
+        );
+    }
+
+    function stopOpenListAction(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+    }
+
+    function closeOpenListMenus(
+        reason,
+        sourceElement
+    ) {
+        /*
+         * Hope MenuContent is rendered in a portal and points to its own
+         * trigger through aria-labelledby. Capture that relation before
+         * the intercepted click finishes, then toggle the exact trigger.
+         */
+        const hopeMenus = [];
+        let content =
+            sourceElement instanceof Element
+                ? sourceElement.closest(
+                    ".hope-menu__content"
+                )
+                : null;
+
+        while (content) {
+            const triggerId = content.getAttribute(
+                "aria-labelledby"
+            );
+            const trigger = triggerId
+                ? document.getElementById(triggerId)
+                : null;
+
+            hopeMenus.push({
+                content,
+                triggerId,
+                trigger
+            });
+
+            content = trigger
+                ? trigger.closest(
+                    ".hope-menu__content"
+                )
+                : null;
+        }
+
+        const dispatchClick = element => {
+            if (!(element instanceof EventTarget)) {
+                return false;
+            }
+
+            return element.dispatchEvent(
+                new MouseEvent("click", {
+                    view: window,
+                    button: 0,
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true
+                })
+            );
+        };
+
+        const dismiss = phase => {
+            const eventOptions = {
+                bubbles: true,
+                cancelable: true,
+                composed: true
+            };
+            const target =
+                document.activeElement instanceof
+                    HTMLElement
+                    ? document.activeElement
+                    : document.body;
+
+            if (target) {
+                target.dispatchEvent(
+                    new KeyboardEvent("keydown", {
+                        ...eventOptions,
+                        key: "Escape",
+                        code: "Escape",
+                        keyCode: 27,
+                        which: 27
+                    })
+                );
+                target.blur();
+            }
+
+            if (document.body) {
+                /*
+                 * Do not synthesize pointerdown/mousedown here. Some
+                 * browser extensions assume those events are trusted and
+                 * call getSelection() on a missing frame, polluting the
+                 * console with unrelated content-script exceptions.
+                 */
+                document.body.dispatchEvent(
+                    new MouseEvent("click", {
+                        ...eventOptions,
+                        button: 0
+                    })
+                );
+            }
+
+            log("Menu dismissal dispatched:", {
+                reason,
+                phase
+            });
+        };
+
+        dismiss("immediate");
+
+        setTimeout(() => {
+            let triggerClicks = 0;
+
+            for (const menu of hopeMenus) {
+                if (
+                    menu.trigger &&
+                    menu.trigger.isConnected &&
+                    menu.trigger.getAttribute(
+                        "aria-expanded"
+                    ) !== "false"
+                ) {
+                    dispatchClick(menu.trigger);
+                    triggerClicks += 1;
+                }
+            }
+
+            dismiss("after-click");
+            log("Associated Hope menu triggers closed:", {
+                reason,
+                menuCount: hopeMenus.length,
+                triggerClicks,
+                menus: hopeMenus.map(menu => ({
+                    triggerId: menu.triggerId,
+                    triggerTag:
+                        menu.trigger &&
+                        menu.trigger.tagName,
+                    triggerClass:
+                        menu.trigger &&
+                        menu.trigger.getAttribute &&
+                        menu.trigger.getAttribute("class"),
+                    expanded:
+                        menu.trigger &&
+                        menu.trigger.getAttribute(
+                            "aria-expanded"
+                        )
+                }))
+            });
+        }, 0);
+
+        setTimeout(() => {
+            let completedTransitions = 0;
+
+            for (const menu of hopeMenus) {
+                if (
+                    !menu.content.isConnected ||
+                    !menu.trigger
+                ) {
+                    continue;
+                }
+
+                if (
+                    menu.trigger.getAttribute(
+                        "aria-expanded"
+                    ) === "true"
+                ) {
+                    dispatchClick(menu.trigger);
+                }
+
+                menu.content.dispatchEvent(
+                    new Event("transitionend", {
+                        bubbles: true
+                    })
+                );
+                menu.content.dispatchEvent(
+                    new Event("animationend", {
+                        bubbles: true
+                    })
+                );
+                completedTransitions += 1;
+            }
+
+            dismiss("hope-transition-fallback");
+            log("Hope menu transitions completed:", {
+                reason,
+                count: completedTransitions
+            });
+        }, 120);
+    }
+
+    function getListItemAnchor(element) {
+        const anchor = element.closest(
+            "a[href]"
+        );
+
+        if (!anchor) {
+            return null;
+        }
+
+        const href =
+            anchor.getAttribute("href");
+        const path = href
+            ? getOpenListPath(href)
+            : null;
+
+        /*
+         * OpenList 使用 CSS Modules，版本升级后列表项的 class 名
+         * 可能改变，不能只依赖 visselect-item/listitem。受管路径负责
+         * 排除设置、登录等普通链接，行内结构负责确认它是文件列表项。
+         */
+        const hasKnownClass =
+            anchor.classList.contains(
+                "visselect-item"
+            ) ||
+            anchor.classList.contains(
+                "listitem"
+            );
+        const hasItemStructure = Boolean(
+            anchor.querySelector("p.name") ||
+            anchor.querySelector("p.size") ||
+            anchor.querySelector(
+                'input[type="checkbox"]'
+            ) ||
+            anchor.querySelector(
+                '[class*="name-box"]'
+            ) ||
+            anchor.querySelector(
+                '[class*="checkbox"]'
+            )
+        );
+
+        if (
+            !path ||
+            !isManagedPath(path) ||
+            (!hasKnownClass && !hasItemStructure)
+        ) {
+            return null;
+        }
+
+        return anchor;
+    }
+
+    function inspectAnchor(anchor) {
+        if (!(anchor instanceof Element)) {
+            return null;
+        }
+
+        const href =
+            anchor.getAttribute("href");
+        const path = href
+            ? getOpenListPath(href)
+            : null;
+        const checkbox = anchor.querySelector(
+            'input[type="checkbox"]'
+        );
+
+        return {
+            href,
+            path,
+            managed: Boolean(
+                path && isManagedPath(path)
+            ),
+            className:
+                anchor.getAttribute("class") || "",
+            hasName: Boolean(
+                anchor.querySelector("p.name")
+            ),
+            hasSize: Boolean(
+                anchor.querySelector("p.size")
+            ),
+            hasCheckbox: Boolean(checkbox),
+            checkboxChecked: Boolean(
+                checkbox && checkbox.checked
+            ),
+            checkboxDataChecked:
+                checkbox &&
+                checkbox.getAttribute(
+                    "data-checked"
+                ),
+            accepted: Boolean(
+                getListItemAnchor(anchor)
+            ),
+            type: getItemType(anchor)
+        };
+    }
+
+    /*
+     * 根据实际调试 DOM 判断类型：
+     *
+     * 文件夹：
+     * p.size = "-"，SVG viewBox = "0 0 512 512"
+     *
+     * 文件：
+     * p.size = "50.00M" 等真实大小，
+     * SVG viewBox = "0 0 16 16"
+     */
+    function getItemType(anchor) {
+        if (!anchor) {
+            return "unknown";
+        }
+
+        const sizeElement =
+            anchor.querySelector("p.size");
+
+        const sizeText = sizeElement
+            ? (
+                sizeElement.textContent || ""
+            ).trim()
+            : null;
+
+        let hasFolderIcon = false;
+        let hasFileIcon = false;
+
+        for (
+            const icon of
+            anchor.querySelectorAll("svg")
+        ) {
+            const viewBox = (
+                icon.getAttribute("viewBox") ||
+                ""
+            )
+                .trim()
+                .replace(/\s+/g, " ");
+
+            if (viewBox === "0 0 512 512") {
+                hasFolderIcon = true;
+            }
+
+            if (viewBox === "0 0 16 16") {
+                hasFileIcon = true;
+            }
+        }
+
+        log(
+            "Item type detected:",
+            {
+                href:
+                    anchor.getAttribute("href"),
+                sizeText,
+                hasFolderIcon,
+                hasFileIcon
+            }
+        );
+
+        if (
+            sizeText !== null &&
+            !FOLDER_SIZE_MARKS.has(sizeText)
+        ) {
+            return "file";
+        }
+
+        if (
+            hasFolderIcon &&
+            sizeText !== null &&
+            FOLDER_SIZE_MARKS.has(sizeText)
+        ) {
+            return "folder";
+        }
+
+        if (hasFileIcon) {
+            return "file";
+        }
+
+        if (hasFolderIcon) {
+            return "folder";
+        }
+
+        if (
+            sizeText !== null &&
+            FOLDER_SIZE_MARKS.has(sizeText)
+        ) {
+            return "folder";
+        }
+
+        return "unknown";
+    }
+
+    function getSelectedItems() {
+        const result = [];
+        const seenPaths = new Set();
+
+        const candidates = new Set();
+        const checkedSelectors = [
+            'input[type="checkbox"]:checked',
+            'input[type="checkbox"][data-checked]',
+            'label[data-checked] input[type="checkbox"]',
+            '[role="checkbox"][aria-checked="true"] input[type="checkbox"]',
+            'a[href].selected',
+            'a[href][aria-selected="true"]'
+        ];
+
+        for (const selector of checkedSelectors) {
+            for (
+                const element of
+                document.querySelectorAll(selector)
+            ) {
+                candidates.add(element);
+            }
+        }
+
+        for (const candidate of candidates) {
+            const anchor =
+                getListItemAnchor(candidate);
+
+            if (!anchor) {
+                continue;
+            }
+
+            const href =
+                anchor.getAttribute("href");
+
+            const path = href
+                ? getOpenListPath(href)
+                : null;
+
+            if (
+                !path ||
+                seenPaths.has(path)
+            ) {
+                continue;
+            }
+
+            seenPaths.add(path);
+
+            result.push({
+                anchor,
+                href: path,
+                type: getItemType(anchor)
+            });
+        }
+
+        log(
+            "Selected items:",
+            {
+                candidateCount:
+                    candidates.size,
+                items: result.map(item => ({
+                    href: item.href,
+                    type: item.type
+                }))
+            }
+        );
+
+        return result;
+    }
+
+    function getSimpleItem(item) {
+        if (!item) {
+            return null;
+        }
+
+        return {
+            href: item.href,
+            type: item.type,
+            filebrowserPath:
+                getFileBrowserRawPath(item.href)
+        };
+    }
+
+    function showNotice(
+        message,
+        isError = false
+    ) {
+        const old = document.getElementById(
+            "openlist-filebrowser-notice"
+        );
+
+        if (old) {
+            old.remove();
+        }
+
+        const notice =
+            document.createElement("div");
+
+        notice.id =
+            "openlist-filebrowser-notice";
+
+        notice.textContent = message;
+        notice.setAttribute("role", "status");
+
+        Object.assign(
+            notice.style,
+            {
+                position: "fixed",
+                top: "24px",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: "99999999",
+                padding: "10px 18px",
+                borderRadius: "8px",
+                background: isError
+                    ? "rgba(190,35,35,0.92)"
+                    : "rgba(0,0,0,0.82)",
+                color: "#fff",
+                fontSize: "14px",
+                fontWeight: "500",
+                boxShadow:
+                    "0 4px 16px rgba(0,0,0,.25)",
+                pointerEvents: "none",
+                transition:
+                    `opacity ${CONFIG.noticeFadeMs}ms ease`
+            }
+        );
+
+        document.body.appendChild(notice);
+
+        setTimeout(() => {
+            notice.style.opacity = "0";
+        }, CONFIG.noticeVisibleMs);
+
+        setTimeout(() => {
+            notice.remove();
+        }, CONFIG.noticeVisibleMs + CONFIG.noticeFadeMs);
+    }
+
+    function startSingleDownload(
+        event,
+        item
+    ) {
+        const validation = {
+            hasItem: Boolean(item),
+            href: item && item.href,
+            type: item && item.type,
+            managedPath: Boolean(
+                item &&
+                isManagedPath(item.href)
+            ),
+            supportedType: Boolean(
+                item &&
+                [
+                    "file",
+                    "folder"
+                ].includes(item.type)
+            )
+        };
+
+        log(
+            "Single-download validation:",
+            validation
+        );
+
+        if (
+            !validation.hasItem ||
+            !validation.managedPath ||
+            !validation.supportedType
+        ) {
+            log(
+                "Single download not intercepted; check target and item type"
+            );
+
+            return false;
+        }
+
+        const downloadUrl =
+            buildFileBrowserDownloadUrl(
+                item.href
+            );
+
+        if (!downloadUrl) {
+            log(
+                "Failed to build FileBrowser URL:",
+                getSimpleItem(item)
+            );
+
+            return false;
+        }
+
+        stopOpenListAction(event);
+        closeOpenListMenus(
+            "single-download",
+            event.target
+        );
+
+        // 中文原文：文件夹“已调用 FileBrowser 打包文件夹”；文件“已调用 FileBrowser 下载文件”。[ZH]
+        showNotice(
+            item.type === "folder"
+                ? CONFIG.messages.singleFolderDownload
+                : CONFIG.messages.singleFileDownload
+        );
+
+        log(
+            "FileBrowser single download:",
+            {
+                href: item.href,
+                type: item.type,
+                url: downloadUrl
+            }
+        );
+
+        /*
+         * 必须在用户点击事件内立即发起下载。使用新标签页可保留
+         * OpenList 文档和脚本运行时，避免返回页面时依赖 BFCache。
+         */
+        launchFileBrowserDownload(downloadUrl);
+
+        return true;
+    }
+
+    function rememberContextTarget(
+        event,
+        source
+    ) {
+        const element = event.target;
+
+        if (!(element instanceof Element)) {
+            log(
+                `${source}: event.target is not an Element`
+            );
+            return false;
+        }
+
+        const rawAnchor =
+            element.closest("a[href]");
+
+        const anchor =
+            getListItemAnchor(element);
+
+        log(
+            `${source} target diagnosis:`,
+            {
+                button: event.button,
+                target: describeElement(element),
+                closestHref:
+                    rawAnchor &&
+                    rawAnchor.getAttribute("href"),
+                acceptedAnchor: Boolean(anchor),
+                previousTarget:
+                    getSimpleItem(lastContextTarget)
+            }
+        );
+
+        /*
+         * 级联菜单本身也可能产生 contextmenu 事件。
+         * 这里保留之前的有效文件目标，不能将其清空。
+         */
+        if (!anchor) {
+            return false;
+        }
+
+        const href =
+            anchor.getAttribute("href");
+
+        const path = href
+            ? getOpenListPath(href)
+            : null;
+
+        if (!path) {
+            log(
+                `${source}: failed to parse href`,
+                href
+            );
+            return false;
+        }
+
+        lastContextTarget = {
+            anchor,
+            href: path,
+            type: getItemType(anchor)
+        };
+
+        log(
+            `${source} target remembered:`,
+            getSimpleItem(lastContextTarget)
+        );
+
+        return true;
+    }
+
+    function resolveContextDownloadTarget() {
+        if (
+            lastContextTarget &&
+            isManagedPath(
+                lastContextTarget.href
+            ) &&
+            [
+                "file",
+                "folder"
+            ].includes(lastContextTarget.type)
+        ) {
+            return lastContextTarget;
+        }
+
+        const selectedItems =
+            getSelectedItems();
+
+        if (selectedItems.length === 1) {
+            log(
+                "Using the only selected item as context target:",
+                getSimpleItem(selectedItems[0])
+            );
+
+            return selectedItems[0];
+        }
+
+        log(
+            "Unable to resolve context-menu target:",
+            {
+                lastContextTarget:
+                    getSimpleItem(
+                        lastContextTarget
+                    ),
+                selectedItems:
+                    selectedItems.map(
+                        getSimpleItem
+                    )
+            }
+        );
+
+        return null;
+    }
+
+    /*
+     * FileBrowser Quantum 1.5.1 的流式下载协议：
+     * GET /api/resources/download，使用重复的 file 查询参数传递多项。
+     */
+    function submitFileBrowserSelection(items) {
+        const downloadUrl =
+            buildFileBrowserDownloadUrl(
+                items.map(item => item.href)
+            );
+
+        if (!downloadUrl) {
+            throw new Error(
+                "Failed to build FileBrowser multi-select URL"
+            );
+        }
+
+        log(
+            "FileBrowser multi-select ZIP URL:",
+            {
+                url: downloadUrl,
+                files: items.map(item =>
+                    getFileBrowserRawPath(
+                        item.href
+                    )
+                )
+            }
+        );
+
+        launchFileBrowserDownload(downloadUrl);
+    }
+
+    function startPackageDownload(
+        event,
+        items
+    ) {
+        if (!items.length) {
+            log(
+                "No file-list items selected; preserving OpenList behavior"
+            );
+
+            return false;
+        }
+
+        const unsupportedItem = items.find(
+            item =>
+                !isManagedPath(item.href) ||
+                ![
+                    "file",
+                    "folder"
+                ].includes(item.type)
+        );
+
+        if (unsupportedItem) {
+            log(
+                "Selection contains unmanaged paths or unknown item types:",
+                unsupportedItem
+            );
+
+            return false;
+        }
+
+        if (
+            items.length === 1 &&
+            items[0].type === "folder"
+        ) {
+            return startSingleDownload(
+                event,
+                items[0]
+            );
+        }
+
+        stopOpenListAction(event);
+        closeOpenListMenus(
+            "multi-select-download",
+            event.target
+        );
+
+        try {
+            submitFileBrowserSelection(items);
+
+            // 中文原文：已调用 FileBrowser 打包 N 个项目。[ZH]
+            showNotice(
+                CONFIG.messages.multiDownload(items.length)
+            );
+
+            return true;
+        } catch (error) {
+            log("FileBrowser multi-select ZIP failed:", error);
+
+            // 中文原文：创建打包下载失败。[ZH]
+            showNotice(
+                CONFIG.messages.packageDownloadFailed,
+                true
+            );
+
+            return false;
+        }
+    }
+
+    function startFileBrowserUpload(event) {
+        const openlistPath = getOpenListPath(
+            window.location.href
+        );
+        const url = openlistPath
+            ? buildFileBrowserUploadUrl(
+                openlistPath
+            )
+            : null;
+
+        if (!url) {
+            log(
+                "Upload remains handled by OpenList:",
+                {
+                    openlistPath,
+                    reason: "unmanaged-path"
+                }
+            );
+
+            return false;
+        }
+
+        stopOpenListAction(event);
+        // 必须在真实点击事件中立即打开，避免丢失浏览器的用户激活状态。
+        const uploadWindow = window.open(
+            url,
+            CONFIG.uploadWindowTarget
+        );
+
+        if (uploadWindow) {
+            uploadWindow.opener = null;
+        }
+
+        closeOpenListMenus(
+            "filebrowser-upload",
+            event.target
+        );
+
+        log("FileBrowser upload page opened:", {
+            openlistPath,
+            url,
+            popupBlocked: uploadWindow === null
+        });
+
+        if (uploadWindow === null) {
+            // 中文原文：浏览器阻止了上传页面，请允许弹出窗口。[ZH]
+            showNotice(
+                CONFIG.messages.uploadPopupBlocked,
+                true
+            );
+        } else {
+            // 中文原文：已打开 FileBrowser 上传页面，请登录后上传。[ZH]
+            showNotice(
+                CONFIG.messages.uploadPageOpened
+            );
+        }
+
+        return true;
+    }
+
+    function isFileDrag(event) {
+        const dataTransfer =
+            event.dataTransfer;
+
+        if (!dataTransfer) {
+            return false;
+        }
+
+        return Array.from(
+            dataTransfer.types || []
+        ).includes("Files");
+    }
+
+    function shouldInterceptFileDrop(event) {
+        if (!isFileDrag(event)) {
+            return false;
+        }
+
+        const openlistPath = getOpenListPath(
+            window.location.href
+        );
+
+        return Boolean(
+            openlistPath &&
+            isManagedPath(openlistPath)
+        );
+    }
+
+    let lastFileDragNoticeAt = 0;
+
+    function showFileDragRedirectNotice() {
+        const now = Date.now();
+
+        if (
+            now - lastFileDragNoticeAt <
+                CONFIG.dragNoticeCooldownMs
+        ) {
+            return;
+        }
+
+        lastFileDragNoticeAt = now;
+
+        // 中文原文：openlist上传功能很垃圾，请转到filebrowser重新拖拽上传。[ZH]
+        showNotice(
+            CONFIG.messages.dragUploadRedirect
+        );
+    }
+
+    function handleWindowDragOver(event) {
+        if (!shouldInterceptFileDrop(event)) {
+            return;
+        }
+
+        /*
+         * 不阻止拖拽事件：OpenList 会在同一个 dragover 流程中
+         * 打开原生上传框，本提示与上传框同步出现。
+         */
+        showFileDragRedirectNotice();
+    }
+
+    function handleWindowDrop(event) {
+            if (!shouldInterceptFileDrop(event)) {
+                return;
+            }
+
+            const openlistPath = getOpenListPath(
+                window.location.href
+            );
+            const url = openlistPath
+                ? buildFileBrowserUploadUrl(
+                    openlistPath
+                )
+                : null;
+            const fileCount =
+                event.dataTransfer &&
+                event.dataTransfer.files
+                    ? event.dataTransfer.files.length
+                    : 0;
+
+            /*
+             * OpenList 已在列表的 dragover 阶段打开原生上传框。
+             * 这里只拦截最终 drop，避免 Upload 组件收到文件并开始上传；
+             * 上传框本身保持打开，同时额外打开 FileBrowser。
+             */
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (
+                typeof event.stopImmediatePropagation ===
+                "function"
+            ) {
+                event.stopImmediatePropagation();
+            }
+
+            const uploadWindow = url
+                ? window.open(
+                    url,
+                    CONFIG.uploadWindowTarget
+                )
+                : null;
+
+            if (uploadWindow) {
+                uploadWindow.opener = null;
+            }
+
+            showFileDragRedirectNotice();
+
+            log(
+                "File-drop handoff result:",
+                {
+                    fileCount,
+                    openlistPath,
+                    url,
+                    openListUploadDialogPreserved:
+                        true,
+                    openListFileUploadBlocked:
+                        true,
+                    popupBlocked:
+                        uploadWindow === null
+                }
+            );
+    }
+
+    function handleDocumentPointerDown(event) {
+        if (event.button === 2) {
+            rememberContextTarget(
+                event,
+                "pointerdown"
+            );
+        }
+    }
+
+    function handleDocumentContextMenu(event) {
+        rememberContextTarget(
+            event,
+            "contextmenu"
+        );
+    }
+
+    /*
+     * 必须监听 window 的捕获阶段。OpenList 的 Solid 菜单使用委托
+     * 点击处理；若本处理器也挂在 document，即使调用
+     * stopImmediatePropagation，也可能排在已注册的原生处理器之后。
+     * window capture 会在事件到达 document 前完成 FileBrowser 接管。
+     */
+    function handleWindowClick(event) {
+            const element = event.target;
+
+            if (!(element instanceof Element)) {
+                return;
+            }
+
+            if (isUploadAction(element)) {
+                const intercepted =
+                    startFileBrowserUpload(event);
+
+                log(
+                    "Upload-action interception result:",
+                    {
+                        intercepted,
+                        labels:
+                            getActionLabels(element),
+                        openlistPath:
+                            getOpenListPath(
+                                window.location.href
+                            )
+                    }
+                );
+
+                if (intercepted) {
+                    return;
+                }
+            }
+
+            const topMenuText = element.closest(
+                ".hope-menu__item__text"
+            );
+
+            const contextMenuContent =
+                element.closest(
+                    ".solid-contextmenu__item__content"
+                );
+
+            // 中文原文：打包下载（同时匹配顶部菜单和右键子菜单）。[ZH]
+            const isPackageDownload =
+                normalizeMenuText(topMenuText) ===
+                    "\u6253\u5305\u4e0b\u8f7d" ||
+                normalizeMenuText(
+                    contextMenuContent
+                ) === "\u6253\u5305\u4e0b\u8f7d";
+
+            if (isPackageDownload) {
+                log(
+                    "Package-download action captured:",
+                    contextMenuContent
+                        ? "context submenu"
+                        : "top menu"
+                );
+
+                const selectedItems =
+                    getSelectedItems();
+
+                log(
+                    "Package-download arguments:",
+                    selectedItems.map(
+                        getSimpleItem
+                    )
+                );
+
+                const intercepted =
+                    startPackageDownload(
+                    event,
+                    selectedItems
+                );
+
+                log(
+                    "Package-download interception result:",
+                    {
+                        intercepted,
+                        eventPhase:
+                            event.eventPhase,
+                        currentTarget:
+                            event.currentTarget === window
+                                ? "window"
+                                : "other",
+                        defaultPrevented:
+                            event.defaultPrevented
+                    }
+                );
+
+                return;
+            }
+
+            if (!contextMenuContent) {
+                return;
+            }
+
+            // 中文原文：下载。[ZH]
+            if (
+                normalizeMenuText(
+                    contextMenuContent
+                ) !== "\u4e0b\u8f7d"
+            ) {
+                return;
+            }
+
+            const target =
+                resolveContextDownloadTarget();
+
+            log(
+                "Context-menu download captured; target:",
+                getSimpleItem(target)
+            );
+
+            const intercepted =
+                startSingleDownload(
+                event,
+                target
+            );
+
+            log(
+                "Context-download interception result:",
+                {
+                    intercepted,
+                    eventPhase:
+                        event.eventPhase,
+                    currentTarget:
+                        event.currentTarget === window
+                            ? "window"
+                            : "other",
+                    defaultPrevented:
+                        event.defaultPrevented
+                }
+            );
+    }
+
+    function installEventHandlers(
+        reason,
+        force = false
+    ) {
+        if (runtime.installed && !force) {
+            return;
+        }
+
+        if (runtime.abortController) {
+            runtime.abortController.abort();
+        }
+
+        const controller = new AbortController();
+        const captureOptions = {
+            capture: true,
+            signal: controller.signal
+        };
+
+        runtime.abortController = controller;
+
+        window.addEventListener(
+            "dragover",
+            handleWindowDragOver,
+            captureOptions
+        );
+        window.addEventListener(
+            "drop",
+            handleWindowDrop,
+            captureOptions
+        );
+        document.addEventListener(
+            "pointerdown",
+            handleDocumentPointerDown,
+            captureOptions
+        );
+        document.addEventListener(
+            "contextmenu",
+            handleDocumentContextMenu,
+            captureOptions
+        );
+        window.addEventListener(
+            "click",
+            handleWindowClick,
+            captureOptions
+        );
+        window.addEventListener(
+            "pageshow",
+            handlePageShow,
+            captureOptions
+        );
+        window.addEventListener(
+            "popstate",
+            handleHistoryReturn,
+            captureOptions
+        );
+        document.addEventListener(
+            "visibilitychange",
+            handleVisibilityChange,
+            captureOptions
+        );
+
+        runtime.installed = true;
+        runtime.installCount += 1;
+        runtime.lastInstallReason = reason;
+
+        log("Event handlers installed:", {
+            reason,
+            installCount: runtime.installCount
+        });
+    }
+
+    function scheduleEventHandlerRefresh(reason) {
+        setTimeout(() => {
+            installEventHandlers(reason, true);
+        }, 0);
+    }
+
+    function handlePageShow(event) {
+        scheduleEventHandlerRefresh(
+            event.persisted
+                ? "pageshow-bfcache"
+                : "pageshow"
+        );
+    }
+
+    function handleHistoryReturn() {
+        scheduleEventHandlerRefresh("popstate");
+    }
+
+    function handleVisibilityChange() {
+        if (document.visibilityState === "visible") {
+            scheduleEventHandlerRefresh(
+                "visibility-visible"
+            );
+        }
+    }
+
+    runtime.ensureInstalled = (
+        reason = "external-check",
+        force = false
+    ) => {
+        installEventHandlers(reason, force);
+    };
+
+    runtime.destroy = reason => {
+        if (runtime.abortController) {
+            runtime.abortController.abort();
+        }
+
+        runtime.abortController = null;
+        runtime.installed = false;
+
+        log("Event handlers removed:", reason);
+    };
+
+    installEventHandlers("initial-load");
+
+    window.OpenListFileBrowserDebug = {
+        config: CONFIG,
+
+        state() {
+            const state = {
+                version: CONFIG.version,
+                pageOrigin:
+                    window.location.origin,
+                filebrowserBase:
+                    getFileBrowserBase(),
+                filebrowserEndpoint:
+                    getFileBrowserEndpoint(),
+                runtime: {
+                    installed: runtime.installed,
+                    installCount:
+                        runtime.installCount,
+                    lastInstallReason:
+                        runtime.lastInstallReason
+                },
+                lastContextTarget:
+                    getSimpleItem(
+                        lastContextTarget
+                    ),
+                selectedItems:
+                    getSelectedItems().map(
+                        getSimpleItem
+                    )
+            };
+
+            console.log(
+                "[OpenList-FileBrowser] Debug state",
+                state
+            );
+
+            return state;
+        },
+
+        reinstall() {
+            runtime.ensureInstalled(
+                "debug-reinstall",
+                true
+            );
+
+            return {
+                installed: runtime.installed,
+                installCount:
+                    runtime.installCount,
+                lastInstallReason:
+                    runtime.lastInstallReason
+            };
+        },
+
+        url(openlistPath) {
+            const result =
+                buildFileBrowserDownloadUrl(
+                    openlistPath
+                );
+
+            console.log(
+                "[OpenList-FileBrowser] URL test",
+                {
+                    openlistPath,
+                    result
+                }
+            );
+
+            return result;
+        },
+
+        uploadUrl(
+            openlistPath = getOpenListPath(
+                window.location.href
+            )
+        ) {
+            const result =
+                buildFileBrowserUploadUrl(
+                    openlistPath
+                );
+
+            console.log(
+                "[OpenList-FileBrowser] Upload URL test",
+                {
+                    openlistPath,
+                    result
+                }
+            );
+
+            return result;
+        },
+
+        scan() {
+            const items = Array.from(
+                document.querySelectorAll(
+                    "a[href]"
+                )
+            )
+                .map(inspectAnchor)
+                .filter(item => item.managed);
+
+            console.table(items);
+            console.log(
+                "[OpenList-FileBrowser] Page item scan:",
+                items
+            );
+
+            return items;
+        },
+
+        async probe() {
+            const url =
+                getFileBrowserBase() + "/health";
+
+            console.log(
+                "[OpenList-FileBrowser] Connectivity test started",
+                url
+            );
+
+            try {
+                const response = await fetch(
+                    url,
+                    {
+                        method: "GET",
+                        mode: "cors",
+                        cache: "no-store"
+                    }
+                );
+
+                const result = {
+                    ok: response.ok,
+                    status: response.status,
+                    statusText:
+                        response.statusText,
+                    contentType:
+                        response.headers.get(
+                            "content-type"
+                        )
+                };
+
+                console.log(
+                    "[OpenList-FileBrowser] Connectivity test result",
+                    result
+                );
+
+                return result;
+            } catch (error) {
+                console.error(
+                    "[OpenList-FileBrowser] Connectivity test failed",
+                    error
+                );
+
+                throw error;
+            }
+        }
+    };
+
+    // 中文原文：OpenList 调用 FileBrowser 下载与上传脚本已加载。[ZH]
+    log(
+        "OpenList \u8c03\u7528 FileBrowser \u4e0b\u8f7d\u4e0e\u4e0a\u4f20\u811a\u672c\u5df2\u52a0\u8f7d",
+        {
+            version: CONFIG.version,
+            pathMappings:
+                CONFIG.pathMappings,
+            filebrowserBase:
+                getFileBrowserBase(),
+            filebrowserEndpoint:
+                getFileBrowserEndpoint()
+        }
+    );
+    })();
+})();
+</script>

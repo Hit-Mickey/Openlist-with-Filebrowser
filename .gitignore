@@ -1,0 +1,13 @@
+
+# 运行时数据和数据库
+/openlist-data/
+/filebrowser-data/*
+!/filebrowser-data/config.example.yaml
+/meilisearch/
+
+# 本地环境变量和敏感配置
+.env
+*.db
+*.sqlite
+*.sqlite3
+*.log
